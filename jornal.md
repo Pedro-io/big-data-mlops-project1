@@ -225,3 +225,66 @@ Estatísticas relevantes:
 - **Normalização / encoding**: não feitos aqui; ficam a cargo do script de treinamento conforme a necessidade de cada modelo.
 - **Variável alvo**: não gerada nessa etapa. Será construída junto com o script de treinamento, provavelmente como um indicador binário de recompra em uma janela futura.
 
+---
+
+#### 4. Refatoração do pipeline de features (2026-05-06)
+
+O script `src/feature_enginer/feature_enginer.py` foi refatorado para corrigir um problema de **data leakage** que existia na abordagem anterior, onde todas as features eram calculadas sobre o dataset completo antes de qualquer divisão treino/teste.
+
+##### Nova estrutura
+
+O pipeline agora segue o padrão `fit / transform`:
+
+1. **Split temporal** — os dados são divididos por tempo (não aleatoriamente), preservando a causalidade da série. O ponto de corte é calculado como `t_min + (t_max - t_min) * 0.8`, o que garante que os primeiros 80% do **intervalo de tempo** vão para treino e os 20% finais para teste.
+2. **`FeatureBuilder.fit(df_train)`** — aprende todas as estatísticas (médias, agregações, data de referência) **exclusivamente** com os dados de treino.
+3. **`FeatureBuilder.transform(df)`** — aplica as estatísticas congeladas do treino sobre qualquer split, sem reaprender nada.
+
+A saída agora são dois arquivos flat em `data/feature_store/`: `train.csv` e `test.csv`, cada um com granularidade de transação e todas as features já unidas em uma única tabela.
+
+##### Tradeoff: um arquivo por grupo de features vs. tabela flat única
+
+Consideramos manter a estrutura anterior de três arquivos separados (`transaction_features.csv`, `user_features.csv`, `user_product_features.csv`), o que facilitaria o reuso isolado de cada grupo de features em diferentes experimentos.
+
+**Optamos pela tabela flat única** por simplicidade: com o número atual de features e grupos, o overhead de gerenciar múltiplos arquivos e fazer os joins manualmente em cada experimento não se justifica. Caso o número de feature sets cresça, essa decisão pode ser revisada.
+
+##### Features geradas
+
+Todas as features abaixo estão presentes em ambas as tabelas (`train.csv` e `test.csv`).
+
+**Features de transação** (calculadas por linha no `transform`):
+
+| Feature | Descrição |
+|---|---|
+| `total_value` | `quantity * price` |
+| `day_of_week` | dia da semana (0=segunda … 6=domingo) |
+| `month` | mês da transação |
+| `is_weekend` | 1 se sábado ou domingo, 0 caso contrário |
+| `days_since_prev_purchase` | dias desde a transação anterior do mesmo usuário; na fronteira treino/teste, usa o último timestamp do treino para evitar NaN |
+
+**Features de usuário** (agregadas no `fit`, por `user_id`):
+
+| Feature | Descrição |
+|---|---|
+| `total_transactions` | total de transações no treino |
+| `user_total_spend` | gasto total acumulado |
+| `user_avg_order_value` | ticket médio por transação |
+| `unique_products` | quantidade de produtos distintos comprados |
+| `user_avg_quantity` | quantidade média por transação |
+| `days_since_last_purchase` | dias desde a última compra até a `reference_date_` |
+| `customer_lifetime_days` | dias entre primeira e última compra |
+| `avg_days_between_purchases` | frequência média de compra em dias (NaN se apenas 1 transação) |
+| `purchases_last_30d` | número de compras nos últimos 30 dias do treino |
+| `spend_last_30d` | gasto nos últimos 30 dias do treino |
+| `purchases_last_90d` | número de compras nos últimos 90 dias do treino |
+| `spend_last_90d` | gasto nos últimos 90 dias do treino |
+
+**Features de usuário × produto** (agregadas no `fit`, por `user_id` + `product_id`):
+
+| Feature | Descrição |
+|---|---|
+| `up_purchase_count` | vezes que o usuário comprou o produto |
+| `up_total_spend` | gasto total do usuário naquele produto |
+| `up_avg_quantity` | quantidade média por compra do par |
+| `up_days_since_last_purchase` | dias desde a última compra daquele produto pelo usuário |
+| `up_last_quantity` | quantidade comprada na transação mais recente do par |
+
